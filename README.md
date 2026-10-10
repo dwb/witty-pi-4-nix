@@ -34,6 +34,9 @@ Changes to the upstream scripts:
   `systemd.services.wittypi.environment.WITTYPI_GPIO_CHIP = "gpiochip0";`.
 - The daemon exits instead of shutting down if waiting for the shutdown
   signal fails.
+- The daemon exits (and the service fails) if the board does not answer on
+  I2C after upstream's five retries, instead of carrying on without it. The
+  hooks are not run in that case.
 - The 1-Wire conflict check looks at whether the halt pin is already claimed
   (`gpioinfo`) instead of grepping `/boot/config.txt` for `dtoverlay=w1-gpio`,
   since NixOS may apply overlays through `hardware.deviceTree` and keeps
