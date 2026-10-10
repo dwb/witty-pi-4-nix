@@ -15,11 +15,11 @@ management HAT for the Raspberry Pi), with a NixOS module for the daemon.
 
 ## How it works
 
-The upstream scripts write their logs and `schedule.wpi` next to themselves,
+The upstream scripts read `schedule.wpi` from next to themselves,
 and run user hooks (`beforeScript.sh`, `afterStartup.sh`, `beforeShutdown.sh`)
 from the same directory. The scripts are therefore symlinked from the store
 into a writable home, `$WITTYPI_HOME` (default `/var/lib/wittypi`), and run
-from there. Logs are in `/var/lib/wittypi/wittyPi.log` and `schedule.log`.
+from there.
 
 Changes to the upstream scripts:
 
@@ -28,6 +28,10 @@ Changes to the upstream scripts:
 - `LC_ALL` is `C.UTF-8` instead of `en_GB.UTF-8`, which is usually not built
   on NixOS.
 - `sudo` is removed (both tools must run as root anyway).
+- Logging goes to syslog/journald with the identifier `wittypi`
+  (`journalctl -t wittypi`) instead of the unrotated `wittyPi.log` and
+  `schedule.log`. User hook output goes to the service's journal as well.
+  Upstream's timestamp prefix is dropped in favour of the journal's.
 - `lsb_release` and `dpkg` calls are replaced.
 
 ## NixOS usage

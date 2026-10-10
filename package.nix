@@ -10,6 +10,7 @@
   gnused,
   i2c-tools,
   systemd,
+  util-linux,
   wiringpi,
 }:
 
@@ -21,6 +22,7 @@ let
     gnugrep
     gnused
     i2c-tools
+    util-linux
     wiringpi
   ];
 in
@@ -41,8 +43,13 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   dontBuild = true;
 
   # The scripts are linked into a writable home directory at runtime by
-  # wittypi-setup-home, since upstream writes logs and schedule.wpi next to
-  # them.
+  # wittypi-setup-home, since upstream reads schedule.wpi and the hooks from
+  # next to them.
+  #
+  # Upstream appends to wittyPi.log and schedule.log in that directory
+  # without rotation. Messages go to syslog (journald) as `wittypi` instead;
+  # stdout is left for the console, so the daemon's stdout can be discarded
+  # without losing anything.
   postPatch = ''
     substituteInPlace utilities.sh \
       --replace-fail 'export LC_ALL=en_GB.UTF-8' \
@@ -50,7 +57,19 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     export PATH="${runtimePath}:$PATH:${lib.getBin systemd}/bin"' \
       --replace-fail '"$(lsb_release -si)"' '"NixOS"' \
       --replace-fail 'dpkg --print-architecture' 'uname -m' \
-      --replace-fail 'sudo ' ""
+      --replace-fail 'sudo ' "" \
+      --replace-fail 'echo $msg >> $wittypi_home/wittyPi.log' \
+        'logger -t wittypi -- "$1"'
+
+    # Hook output goes to stderr, which the service sends to the journal.
+    # Not a pipe to logger, so hooks that background a command don't block.
+    substituteInPlace daemon.sh \
+      --replace-fail '>> "$cur_dir/wittyPi.log" 2>&1' '1>&2' \
+      --replace-fail '>> "$cur_dir/schedule.log" &' '>/dev/null &'
+
+    substituteInPlace wittyPi.sh \
+      --replace-fail '. "$my_dir/runScript.sh" | tee -a "$my_dir/schedule.log"' \
+        '(. "$my_dir/runScript.sh")'
   '';
 
   installPhase = ''

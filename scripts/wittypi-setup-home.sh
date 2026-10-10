@@ -1,7 +1,7 @@
 #!@bash@/bin/bash
 # Populate a writable Witty Pi home directory.
 #
-# The upstream scripts locate their siblings, logs and schedule.wpi relative
+# The upstream scripts locate their siblings, hooks and schedule.wpi relative
 # to their own directory, so they are symlinked from the store into a
 # writable directory and run from there.
 set -eu
@@ -24,5 +24,3 @@ for f in afterStartup.sh beforeScript.sh beforeShutdown.sh; do
     install -m 0755 "$share/$f" "$home/$f"
   fi
 done
-
-touch "$home/wittyPi.log" "$home/schedule.log"

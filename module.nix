@@ -125,6 +125,10 @@ in
         Type = "simple";
         ExecStart = lib.getExe' cfg.package "wittypi-daemon";
         Restart = "no";
+        # Everything on stdout is also sent to syslog by the scripts.
+        StandardOutput = "null";
+        StandardError = "journal";
+        SyslogIdentifier = "wittypi";
       };
     };
   };
