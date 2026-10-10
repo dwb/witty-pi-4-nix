@@ -135,18 +135,17 @@ index 7a66428..d37deca 100755
      log '  Done :-)'
    else
      log '  Can not get legit network time.'
-@@ -353,8 +354,8 @@ rtc_to_system()
+@@ -353,8 +354,7 @@ rtc_to_system()
  {
    log '  Writing RTC time to system...'
    local rtc_ts=$(get_rtc_timestamp)
 -  sudo timedatectl set-ntp 0 >/dev/null
 -  sudo date -s @$rtc_ts >/dev/null
-+  timedatectl set-ntp 0 >/dev/null
 +  date -s @$rtc_ts >/dev/null
    TIME_UNKNOWN=0
    log '  Done :-)'
  }
-@@ -386,7 +387,7 @@ log2file()
+@@ -386,7 +386,7 @@ log2file()
      datetime=$(date +'<%Y-%m-%d %H:%M:%S>')
    fi
    local msg="$datetime $1"
@@ -155,7 +154,7 @@ index 7a66428..d37deca 100755
  }
  
  log()
-@@ -484,8 +485,7 @@ do_shutdown()
+@@ -484,8 +484,7 @@ do_shutdown()
    local has_mc=$2
  
    # restore halt pin
@@ -165,7 +164,7 @@ index 7a66428..d37deca 100755
  
    # clear alarm flags
    if [ "$has_mc" == "1" ] ; then
-@@ -695,3 +695,43 @@ check_sys_and_rtc_time()
+@@ -695,3 +694,43 @@ check_sys_and_rtc_time()
      echo 'Please synchronize the time first.'
    fi
  }

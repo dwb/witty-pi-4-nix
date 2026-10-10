@@ -99,10 +99,13 @@ The hook options are always managed declaratively; editing the hook files in
   Verify with `i2cdetect -y 1`; the board answers at `0x08`.
 - GPIO-4 (halt) and GPIO-17 (SYS_UP) are used by the board; do not enable the
   1-Wire overlay on GPIO-4.
-- When the RTC has a valid time, the daemon copies it to the system clock and
-  runs `timedatectl set-ntp 0`, which disables `systemd-timesyncd`. This is
-  upstream behaviour. Use `wittypi` → "Synchronize with network time" to
-  update the RTC from the network.
+- When the RTC has a valid time, the daemon copies it to the system clock.
+  Upstream also disables NTP with `timedatectl set-ntp 0`; that is dropped
+  here, since it cannot change units on NixOS. `systemd-timesyncd` stays
+  under NixOS control and corrects the system clock when the network is up;
+  set `services.timesyncd.enable = false;` to make the RTC the only time
+  source. The RTC itself is only updated through `wittypi` → "Synchronize
+  with network time".
 - The service is not restarted by `nixos-rebuild switch`, since it performs
   one-off boot work (time sync, scheduling, the SYS_UP signal). New versions
   take effect at the next boot.
