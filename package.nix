@@ -57,6 +57,8 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   #   it can identify the board from the Raspberry Pi kernel or firmware
   #   device tree. daemon.sh exits rather than shutting down if waiting for
   #   the shutdown signal fails.
+  # - Detects a conflict on the halt pin (e.g. 1-Wire) from the live GPIO
+  #   state instead of grepping /boot/config.txt.
   patches = [ ./nixos.patch ];
 
   postPatch = ''

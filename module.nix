@@ -9,6 +9,8 @@ self:
 let
   cfg = config.services.wittypi;
   home = "/var/lib/wittypi";
+  # Upstream's I2C_BUS; the device unit for /dev/i2c-1.
+  i2cDevice = "dev-i2c\\x2d1.device";
 
   hookScript =
     name: text:
@@ -83,6 +85,12 @@ in
   config = lib.mkIf cfg.enable {
     hardware.i2c.enable = lib.mkDefault true;
 
+    # /dev/i2c-1 appears once the I2C controller driver has probed, which can
+    # be after systemd-modules-load. Tag it so the service can wait for it.
+    services.udev.extraRules = ''
+      SUBSYSTEM=="i2c-dev", KERNEL=="i2c-1", TAG+="systemd"
+    '';
+
     environment.systemPackages = [ cfg.package ];
 
     systemd.tmpfiles.settings.wittypi = {
@@ -102,7 +110,11 @@ in
     systemd.services.wittypi = {
       description = "Witty Pi 4 daemon";
       wantedBy = [ "multi-user.target" ];
+      # Wants rather than requires: if the bus never appears, the daemon still
+      # starts after the device timeout and logs that the board is missing.
+      wants = [ i2cDevice ];
       after = [
+        i2cDevice
         "systemd-modules-load.service"
         "systemd-tmpfiles-setup.service"
       ];

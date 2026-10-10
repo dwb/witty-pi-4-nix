@@ -34,6 +34,10 @@ Changes to the upstream scripts:
   `systemd.services.wittypi.environment.WITTYPI_GPIO_CHIP = "gpiochip0";`.
 - The daemon exits instead of shutting down if waiting for the shutdown
   signal fails.
+- The 1-Wire conflict check looks at whether the halt pin is already claimed
+  (`gpioinfo`) instead of grepping `/boot/config.txt` for `dtoverlay=w1-gpio`,
+  since NixOS may apply overlays through `hardware.deviceTree` and keeps
+  `config.txt` elsewhere, if at all.
 - `LC_ALL` is `C.UTF-8` instead of `en_GB.UTF-8`, which is usually not built
   on NixOS.
 - `sudo` is removed (both tools must run as root anyway).
@@ -96,7 +100,9 @@ The hook options are always managed declaratively; editing the hook files in
   `hardware.i2c.enable` (loads `i2c-dev`), but the Pi's I2C controller has to
   be enabled separately, e.g. with nixos-hardware
   (`hardware.raspberry-pi."4".i2c1.enable = true;`) or a device tree overlay.
-  Verify with `i2cdetect -y 1`; the board answers at `0x08`.
+  Verify with `i2cdetect -y 1`; the board answers at `0x08`. The service
+  waits for `/dev/i2c-1` to appear (up to systemd's device timeout) before
+  starting.
 - GPIO-4 (halt) and GPIO-17 (SYS_UP) are used by the board; do not enable the
   1-Wire overlay on GPIO-4.
 - When the RTC has a valid time, the daemon copies it to the system clock.

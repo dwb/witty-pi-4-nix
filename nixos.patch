@@ -1,8 +1,14 @@
 diff --git a/daemon.sh b/daemon.sh
-index 5da94e1..9ef5928 100755
+index 5da94e1..7ed3a3b 100755
 --- a/daemon.sh
 +++ b/daemon.sh
-@@ -30,15 +30,14 @@ if one_wire_confliction ; then
+@@ -25,20 +25,19 @@ log "Running on $pi_model"
+ 
+ # check 1-wire confliction
+ if one_wire_confliction ; then
+-  log "Confliction: 1-Wire interface is enabled on GPIO-$HALT_PIN, which is also used by Witty Pi."
++  log "Confliction: GPIO-$HALT_PIN, which is used by Witty Pi, is in use by \"$(halt_pin_consumer)\" (1-Wire?)."
+   log 'Witty Pi daemon can not work until you solve this confliction and reboot Raspberry Pi.'
    exit
  fi
  
@@ -95,7 +101,7 @@ index 5da94e1..9ef5928 100755
  # shutdown Raspberry Pi
  do_shutdown $HALT_PIN $has_mc
 diff --git a/utilities.sh b/utilities.sh
-index 7a66428..d37deca 100755
+index 7a66428..b950d8f 100755
 --- a/utilities.sh
 +++ b/utilities.sh
 @@ -4,7 +4,8 @@
@@ -108,16 +114,58 @@ index 7a66428..d37deca 100755
  
  if [ -z ${I2C_MC_ADDRESS+x} ]; then
    readonly I2C_MC_ADDRESS=0x08
-@@ -109,7 +110,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
+@@ -108,38 +109,26 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
+   readonly REASON_REBOOT='0x0b'
    readonly REASON_GUARANTEED_WAKE='0x0c'
  
-   # config file
+-  # config file
 -  if [ "$(lsb_release -si)" == "Ubuntu" ]; then
-+  if [ "NixOS" == "Ubuntu" ]; then
-     # Ubuntu
-     readonly BOOT_CONFIG_FILE="/boot/firmware/usercfg.txt"
-   else
-@@ -186,7 +187,7 @@ get_kernel()
+-    # Ubuntu
+-    readonly BOOT_CONFIG_FILE="/boot/firmware/usercfg.txt"
+-  else
+-    # Raspberry Pi OS ("$(lsb_release -si)" == "Debian") and others
+-    readonly BOOT_CONFIG_FILE="/boot/config.txt"
+-  fi
+-
+   TIME_UNKNOWN=0
+ 
+   SOFTWARE_VERSION='4.23'
+ fi
+ 
+ 
++# Print the consumer holding the halt pin, if any.
++halt_pin_consumer()
++{
++  gpioinfo -c "$WITTYPI_GPIO_CHIP" "$HALT_PIN" 2>/dev/null \
++    | sed -n 's/.* consumer="\(.*\)"$/\1/p'
++}
++
++# Succeeds if the halt pin is claimed by something other than Witty Pi, such
++# as the 1-Wire driver. Checks the running system rather than config.txt,
++# which NixOS may not use for device tree overlays.
+ one_wire_confliction()
+ {
+-  if [[ $HALT_PIN -eq 4 ]]; then
+-    if grep -qe "^\s*dtoverlay=w1-gpio\s*$" ${BOOT_CONFIG_FILE}; then
+-      return 0
+-    fi
+-    if grep -qe "^\s*dtoverlay=w1-gpio-pullup\s*$" ${BOOT_CONFIG_FILE}; then
+-      return 0
+-    fi
+-  fi
+-  if grep -qe "^\s*dtoverlay=w1-gpio,gpiopin=$HALT_PIN\s*$" ${BOOT_CONFIG_FILE}; then
+-    return 0
+-  fi
+-  if grep -qe "^\s*dtoverlay=w1-gpio-pullup,gpiopin=$HALT_PIN\s*$" ${BOOT_CONFIG_FILE}; then
+-    return 0
+-  fi
+-  return 1
++  local consumer=$(halt_pin_consumer)
++  [ -n "$consumer" ] && [ "$consumer" != 'wittypi' ]
+ }
+ 
+ has_internet()
+@@ -186,7 +175,7 @@ get_kernel()
  
  get_arch()
  {
@@ -126,7 +174,7 @@ index 7a66428..d37deca 100755
  }
  
  get_sys_time()
-@@ -320,7 +321,7 @@ net_to_system()
+@@ -320,7 +309,7 @@ net_to_system()
    local net_ts=$(get_network_timestamp)
    if [[ "$net_ts" != "-1" ]]; then
      log '  Applying network time to system...'
@@ -135,7 +183,7 @@ index 7a66428..d37deca 100755
      log '  Done :-)'
    else
      log '  Can not get legit network time.'
-@@ -353,8 +354,7 @@ rtc_to_system()
+@@ -353,8 +342,7 @@ rtc_to_system()
  {
    log '  Writing RTC time to system...'
    local rtc_ts=$(get_rtc_timestamp)
@@ -145,7 +193,7 @@ index 7a66428..d37deca 100755
    TIME_UNKNOWN=0
    log '  Done :-)'
  }
-@@ -386,7 +386,7 @@ log2file()
+@@ -386,7 +374,7 @@ log2file()
      datetime=$(date +'<%Y-%m-%d %H:%M:%S>')
    fi
    local msg="$datetime $1"
@@ -154,7 +202,7 @@ index 7a66428..d37deca 100755
  }
  
  log()
-@@ -484,8 +484,7 @@ do_shutdown()
+@@ -484,8 +472,7 @@ do_shutdown()
    local has_mc=$2
  
    # restore halt pin
@@ -164,7 +212,7 @@ index 7a66428..d37deca 100755
  
    # clear alarm flags
    if [ "$has_mc" == "1" ] ; then
-@@ -695,3 +694,43 @@ check_sys_and_rtc_time()
+@@ -695,3 +682,43 @@ check_sys_and_rtc_time()
      echo 'Please synchronize the time first.'
    fi
  }
@@ -187,32 +235,39 @@ index 7a66428..d37deca 100755
 +# Make the pin an input with the internal pull-up enabled.
 +gpio_input_pullup()
 +{
-+  gpioget -c "$WITTYPI_GPIO_CHIP" --bias=pull-up "$1" >/dev/null
++  gpioget -C wittypi -c "$WITTYPI_GPIO_CHIP" --bias=pull-up "$1" >/dev/null
 +}
 +
 +# Print the pin's value (0 or 1), reading it with the internal pull-up enabled.
 +gpio_read_pullup()
 +{
-+  gpioget -c "$WITTYPI_GPIO_CHIP" --bias=pull-up --numeric "$1"
++  gpioget -C wittypi -c "$WITTYPI_GPIO_CHIP" --bias=pull-up --numeric "$1"
 +}
 +
 +# Drive the pin 1, 0, 1, 0 for 100ms each, then leave it as an input.
 +gpio_pulse_twice()
 +{
-+  gpioset -c "$WITTYPI_GPIO_CHIP" -p 100ms -t 100ms,100ms,100ms,0 "$1=1" \
-+    && gpioget -c "$WITTYPI_GPIO_CHIP" "$1" >/dev/null
++  gpioset -C wittypi -c "$WITTYPI_GPIO_CHIP" -p 100ms -t 100ms,100ms,100ms,0 "$1=1" \
++    && gpioget -C wittypi -c "$WITTYPI_GPIO_CHIP" "$1" >/dev/null
 +}
 +
 +# Block until a falling edge on the pin, with the internal pull-up enabled.
 +gpio_wait_falling()
 +{
-+  gpiomon -c "$WITTYPI_GPIO_CHIP" --bias=pull-up --edges=falling --num-events=1 "$1" >/dev/null
++  gpiomon -C wittypi -c "$WITTYPI_GPIO_CHIP" --bias=pull-up --edges=falling --num-events=1 "$1" >/dev/null
 +}
 diff --git a/wittyPi.sh b/wittyPi.sh
-index 143093d..99ea562 100755
+index 143093d..230c937 100755
 --- a/wittyPi.sh
 +++ b/wittyPi.sh
-@@ -37,10 +37,10 @@ if one_wire_confliction ; then
+@@ -31,16 +31,16 @@ fi
+ if one_wire_confliction ; then
+ 	echo ''
+ 	log 'Confliction detected:'
+-	log "1-Wire interface is enabled on GPIO-$HALT_PIN, which is also used by Witty Pi."
++	log "GPIO-$HALT_PIN, which is used by Witty Pi, is in use by \"$(halt_pin_consumer)\" (1-Wire?)."
+ 	log 'You may solve this confliction by moving 1-Wire interface to another GPIO pin.'
+ 	echo ''
  	exit
  fi
  
