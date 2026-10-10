@@ -46,72 +46,25 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   # wittypi-setup-home, since upstream reads schedule.wpi and the hooks from
   # next to them.
   #
-  # Upstream appends to wittyPi.log and schedule.log in that directory
-  # without rotation. Messages go to syslog (journald) as `wittypi` instead;
-  # stdout is left for the console, so the daemon's stdout can be discarded
-  # without losing anything.
+  # nixos.patch:
+  # - Puts runtime dependencies on PATH, sets a locale that exists on NixOS,
+  #   and drops sudo, lsb_release and dpkg.
+  # - Logs to syslog (journald) as `wittypi` instead of the unrotated
+  #   wittyPi.log and schedule.log. Hook output goes to stderr, which the
+  #   service sends to the journal (not a pipe to logger, so hooks that
+  #   background a command don't block); the daemon's stdout can be discarded.
+  # - Uses libgpiod instead of WiringPi's `gpio`, which refuses to run unless
+  #   it can identify the board from the Raspberry Pi kernel or firmware
+  #   device tree. daemon.sh exits rather than shutting down if waiting for
+  #   the shutdown signal fails.
+  patches = [ ./nixos.patch ];
+
   postPatch = ''
     substituteInPlace utilities.sh \
-      --replace-fail 'export LC_ALL=en_GB.UTF-8' \
-        'export LC_ALL=C.UTF-8
-    export PATH="${runtimePath}:$PATH:${lib.getBin systemd}/bin"
-    . ${./scripts/gpio.sh}' \
-      --replace-fail '"$(lsb_release -si)"' '"NixOS"' \
-      --replace-fail 'dpkg --print-architecture' 'uname -m' \
-      --replace-fail 'sudo ' "" \
-      --replace-fail 'echo $msg >> $wittypi_home/wittyPi.log' \
-        'logger -t wittypi -- "$1"'
+      --subst-var-by path ${runtimePath} \
+      --subst-var-by systemdPath ${lib.getBin systemd}/bin
 
-    # Hook output goes to stderr, which the service sends to the journal.
-    # Not a pipe to logger, so hooks that background a command don't block.
-    substituteInPlace daemon.sh \
-      --replace-fail '>> "$cur_dir/wittyPi.log" 2>&1' '1>&2' \
-      --replace-fail '>> "$cur_dir/schedule.log" &' '>/dev/null &'
-
-    substituteInPlace wittyPi.sh \
-      --replace-fail '. "$my_dir/runScript.sh" | tee -a "$my_dir/schedule.log"' \
-        '(. "$my_dir/runScript.sh")'
-
-    # WiringPi's `gpio` fails unless it can identify the board from the
-    # Raspberry Pi kernel or firmware device tree, and daemon.sh then shuts
-    # down as if requested. Use libgpiod instead (helpers in gpio.sh).
-    substituteInPlace utilities.sh \
-      --replace-fail 'gpio -g mode $halt_pin in' "" \
-      --replace-fail 'gpio -g mode $halt_pin up' 'gpio_input_pullup $halt_pin'
-
-    substituteInPlace daemon.sh wittyPi.sh \
-      --replace-fail 'hash gpio ' 'hash gpioget '
-
-    substituteInPlace wittyPi.sh \
-      --replace-fail '$(gpio -g read $CHRG_PIN)' '$(gpio_read_pullup $CHRG_PIN)' \
-      --replace-fail '$(gpio -g read $STDBY_PIN)' '$(gpio_read_pullup $STDBY_PIN)'
-
-    substituteInPlace daemon.sh \
-      --replace-fail 'gpio -g mode $HALT_PIN up' 'gpio_input_pullup $HALT_PIN' \
-      --replace-fail 'gpio -g mode $HALT_PIN in' "" \
-      --replace-fail 'gpio -g mode $CHRG_PIN up' 'gpio_input_pullup $CHRG_PIN' \
-      --replace-fail 'gpio -g mode $CHRG_PIN in' "" \
-      --replace-fail 'gpio -g mode $STDBY_PIN up' 'gpio_input_pullup $STDBY_PIN' \
-      --replace-fail 'gpio -g mode $STDBY_PIN in' "" \
-      --replace-fail '[ $(gpio -g read $HALT_PIN) == '"'1'"' ]' \
-        '[ "$(gpio_read_pullup $HALT_PIN)" == '"'1'"' ]' \
-      --replace-fail 'gpio -g mode $SYSUP_PIN out
-    gpio -g write $SYSUP_PIN 1
-    sleep 0.1
-    gpio -g write $SYSUP_PIN 0
-    sleep 0.1
-    gpio -g write $SYSUP_PIN 1
-    sleep 0.1
-    gpio -g write $SYSUP_PIN 0
-    sleep 0.1
-    gpio -g mode $SYSUP_PIN in' \
-        'gpio_pulse_twice $SYSUP_PIN' \
-      --replace-fail 'gpio -g wfi $HALT_PIN falling' \
-        'if ! gpio_wait_falling $HALT_PIN; then
-      log "Unable to wait for GPIO-$HALT_PIN, exiting without shutting down."
-      exit 1
-    fi'
-
+    # Catch WiringPi calls added upstream that the patch doesn't cover.
     if grep -n 'gpio -g' *.sh; then
       echo "unpatched WiringPi calls remain" >&2
       exit 1

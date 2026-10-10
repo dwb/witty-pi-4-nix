@@ -1,0 +1,249 @@
+diff --git a/daemon.sh b/daemon.sh
+index 5da94e1..9ef5928 100755
+--- a/daemon.sh
++++ b/daemon.sh
+@@ -30,15 +30,14 @@ if one_wire_confliction ; then
+   exit
+ fi
+ 
+-# do not run further if wiringPi is not installed
+-if ! hash gpio 2>/dev/null; then
+-  log 'Seems wiringPi is not installed, please run again the latest installation script to fix this.'
++# do not run further if libgpiod is not installed
++if ! hash gpioget 2>/dev/null; then
++  log 'Seems libgpiod is not installed.'
+   exit
+ fi
+ 
+ # make sure the halt pin is input with internal pull up
+-gpio -g mode $HALT_PIN up
+-gpio -g mode $HALT_PIN in
++gpio_input_pullup $HALT_PIN
+ 
+ 
+ # check if micro controller presents
+@@ -151,16 +150,14 @@ fi
+ 
+ # L3V7 only: make sure CHRG_PIN and STDBY_PIN are input with internal pull-up
+ if [ $(($firmwareID)) -eq 55 ]; then
+-  gpio -g mode $CHRG_PIN up
+-  gpio -g mode $CHRG_PIN in
+-  gpio -g mode $STDBY_PIN up
+-  gpio -g mode $STDBY_PIN in
++  gpio_input_pullup $CHRG_PIN
++  gpio_input_pullup $STDBY_PIN
+ fi
+ 
+ # delay until GPIO pin state gets stable
+ counter=0
+ while [ $counter -lt 5 ]; do  # increase this value if it needs more time
+-  if [ $(gpio -g read $HALT_PIN) == '1' ] ; then
++  if [ "$(gpio_read_pullup $HALT_PIN)" == '1' ] ; then
+     counter=$(($counter+1))
+   else
+     counter=0
+@@ -169,34 +166,28 @@ while [ $counter -lt 5 ]; do  # increase this value if it needs more time
+ done
+ 
+ # run beforeScript.sh
+-"$cur_dir/beforeScript.sh" >> "$cur_dir/wittyPi.log" 2>&1
++"$cur_dir/beforeScript.sh" 1>&2
+ 
+ # run schedule script
+ if [ $has_mc == 1 ] ; then
+-  "$cur_dir/runScript.sh" 0 revise >> "$cur_dir/schedule.log" &
++  "$cur_dir/runScript.sh" 0 revise >/dev/null &
+ else
+   log 'Witty Pi is not connected, skip schedule script...'
+ fi
+ 
+ # run afterStartup.sh
+-"$cur_dir/afterStartup.sh" >> "$cur_dir/wittyPi.log" 2>&1
++"$cur_dir/afterStartup.sh" 1>&2
+ 
+ # indicates system is up
+ log "Send out the SYS_UP signal via GPIO-$SYSUP_PIN pin."
+-gpio -g mode $SYSUP_PIN out
+-gpio -g write $SYSUP_PIN 1
+-sleep 0.1
+-gpio -g write $SYSUP_PIN 0
+-sleep 0.1
+-gpio -g write $SYSUP_PIN 1
+-sleep 0.1
+-gpio -g write $SYSUP_PIN 0
+-sleep 0.1
+-gpio -g mode $SYSUP_PIN in
++gpio_pulse_twice $SYSUP_PIN
+ 
+ # wait for GPIO-4 (BCM naming) falling, or alarm 2 (shutdown)
+ log 'Pending for incoming shutdown command...'
+-gpio -g wfi $HALT_PIN falling
++if ! gpio_wait_falling $HALT_PIN; then
++  log "Unable to wait for GPIO-$HALT_PIN, exiting without shutting down."
++  exit 1
++fi
+ 
+ if [ $has_mc == 1 ] ; then
+   reason=$(i2c_read ${I2C_BUS} $I2C_MC_ADDRESS $I2C_ACTION_REASON)
+@@ -222,7 +213,7 @@ else
+ fi
+ 
+ # run beforeShutdown.sh
+-"$cur_dir/beforeShutdown.sh" >> "$cur_dir/wittyPi.log" 2>&1
++"$cur_dir/beforeShutdown.sh" 1>&2
+ 
+ # shutdown Raspberry Pi
+ do_shutdown $HALT_PIN $has_mc
+diff --git a/utilities.sh b/utilities.sh
+index 7a66428..d37deca 100755
+--- a/utilities.sh
++++ b/utilities.sh
+@@ -4,7 +4,8 @@
+ # This script provides some useful utility functions
+ #
+ 
+-export LC_ALL=en_GB.UTF-8
++export LC_ALL=C.UTF-8
++export PATH="@path@:$PATH:@systemdPath@"
+ 
+ if [ -z ${I2C_MC_ADDRESS+x} ]; then
+   readonly I2C_MC_ADDRESS=0x08
+@@ -109,7 +110,7 @@ if [ -z ${I2C_MC_ADDRESS+x} ]; then
+   readonly REASON_GUARANTEED_WAKE='0x0c'
+ 
+   # config file
+-  if [ "$(lsb_release -si)" == "Ubuntu" ]; then
++  if [ "NixOS" == "Ubuntu" ]; then
+     # Ubuntu
+     readonly BOOT_CONFIG_FILE="/boot/firmware/usercfg.txt"
+   else
+@@ -186,7 +187,7 @@ get_kernel()
+ 
+ get_arch()
+ {
+-  echo $(dpkg --print-architecture)
++  echo $(uname -m)
+ }
+ 
+ get_sys_time()
+@@ -320,7 +321,7 @@ net_to_system()
+   local net_ts=$(get_network_timestamp)
+   if [[ "$net_ts" != "-1" ]]; then
+     log '  Applying network time to system...'
+-    sudo date -u -s @$net_ts >/dev/null
++    date -u -s @$net_ts >/dev/null
+     log '  Done :-)'
+   else
+     log '  Can not get legit network time.'
+@@ -353,8 +354,8 @@ rtc_to_system()
+ {
+   log '  Writing RTC time to system...'
+   local rtc_ts=$(get_rtc_timestamp)
+-  sudo timedatectl set-ntp 0 >/dev/null
+-  sudo date -s @$rtc_ts >/dev/null
++  timedatectl set-ntp 0 >/dev/null
++  date -s @$rtc_ts >/dev/null
+   TIME_UNKNOWN=0
+   log '  Done :-)'
+ }
+@@ -386,7 +387,7 @@ log2file()
+     datetime=$(date +'<%Y-%m-%d %H:%M:%S>')
+   fi
+   local msg="$datetime $1"
+-  echo $msg >> $wittypi_home/wittyPi.log
++  logger -t wittypi -- "$1"
+ }
+ 
+ log()
+@@ -484,8 +485,7 @@ do_shutdown()
+   local has_mc=$2
+ 
+   # restore halt pin
+-  gpio -g mode $halt_pin in
+-  gpio -g mode $halt_pin up
++  gpio_input_pullup $halt_pin
+ 
+   # clear alarm flags
+   if [ "$has_mc" == "1" ] ; then
+@@ -695,3 +695,43 @@ check_sys_and_rtc_time()
+     echo 'Please synchronize the time first.'
+   fi
+ }
++
++# GPIO access through libgpiod, replacing WiringPi's `gpio`, which only works
++# when it can identify the board from the Raspberry Pi kernel or
++# firmware-provided device tree.
++#
++# Pins are BCM numbers, which are the line offsets on the GPIO controller
++# driving the 40-pin header. Set WITTYPI_GPIO_CHIP to a chip name, number or
++# path if it is not detected.
++if [ -z "${WITTYPI_GPIO_CHIP:-}" ]; then
++  WITTYPI_GPIO_CHIP=$(gpiodetect 2>/dev/null \
++    | awk '/\[(pinctrl-bcm2835|pinctrl-bcm2711|pinctrl-rp1)\]/ { print $1; exit }')
++  if [ -z "$WITTYPI_GPIO_CHIP" ]; then
++    echo 'wittypi: GPIO header chip not found, set WITTYPI_GPIO_CHIP (see gpiodetect)' >&2
++  fi
++fi
++
++# Make the pin an input with the internal pull-up enabled.
++gpio_input_pullup()
++{
++  gpioget -c "$WITTYPI_GPIO_CHIP" --bias=pull-up "$1" >/dev/null
++}
++
++# Print the pin's value (0 or 1), reading it with the internal pull-up enabled.
++gpio_read_pullup()
++{
++  gpioget -c "$WITTYPI_GPIO_CHIP" --bias=pull-up --numeric "$1"
++}
++
++# Drive the pin 1, 0, 1, 0 for 100ms each, then leave it as an input.
++gpio_pulse_twice()
++{
++  gpioset -c "$WITTYPI_GPIO_CHIP" -p 100ms -t 100ms,100ms,100ms,0 "$1=1" \
++    && gpioget -c "$WITTYPI_GPIO_CHIP" "$1" >/dev/null
++}
++
++# Block until a falling edge on the pin, with the internal pull-up enabled.
++gpio_wait_falling()
++{
++  gpiomon -c "$WITTYPI_GPIO_CHIP" --bias=pull-up --edges=falling --num-events=1 "$1" >/dev/null
++}
+diff --git a/wittyPi.sh b/wittyPi.sh
+index 143093d..99ea562 100755
+--- a/wittyPi.sh
++++ b/wittyPi.sh
+@@ -37,10 +37,10 @@ if one_wire_confliction ; then
+ 	exit
+ fi
+ 
+-# do not run further if wiringPi is not installed
+-if ! hash gpio 2>/dev/null; then
++# do not run further if libgpiod is not installed
++if ! hash gpioget 2>/dev/null; then
+   echo ''
+-  log 'Seems wiringPi is not installed, please run again the latest installation script to fix this.'
++  log 'Seems libgpiod is not installed.'
+   echo ''
+   exit
+ fi
+@@ -151,7 +151,7 @@ choose_schedule_script()
+       log "  Copying \"${script##*/}\" to \"schedule.wpi\"..."
+       cp ${script} "$my_dir/schedule.wpi"
+       log '  Running the script...'
+-      . "$my_dir/runScript.sh" | tee -a "$my_dir/schedule.log"
++      (. "$my_dir/runScript.sh")
+       log '  Done :-)'
+     else
+       echo "  \"$index\" is not a good choice, I need a number from 1 to $count"
+@@ -582,8 +582,8 @@ while true; do
+     voltages+="Vout=$(printf %.02f $vout)V, Iout=$(printf %.02f $iout)A"
+     
+     if [ $(($firmwareID)) -eq 55 ]; then
+-      chrg=$(gpio -g read $CHRG_PIN)
+-      stdby=$(gpio -g read $STDBY_PIN)
++      chrg=$(gpio_read_pullup $CHRG_PIN)
++      stdby=$(gpio_read_pullup $STDBY_PIN)
+       if [ "$chrg" == "1" ] && [ "$stdby" == "1" ]; then
+         voltages+=" (discharging battery...)"
+       elif [ "$chrg" == "0" ] && [ "$stdby" == "1" ]; then
