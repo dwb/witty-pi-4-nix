@@ -23,8 +23,17 @@ from there.
 
 Changes to the upstream scripts:
 
-- Runtime dependencies (`i2c-tools`, `wiringpi`, coreutils, etc.) are put on
+- Runtime dependencies (`i2c-tools`, `libgpiod`, coreutils, etc.) are put on
   `PATH`.
+- GPIO access uses libgpiod instead of WiringPi's `gpio`, which refuses to
+  run unless it can identify the board from the Raspberry Pi kernel or the
+  firmware-provided device tree (not the case with e.g. a mainline kernel and
+  U-Boot). The header's GPIO chip is found by its label (`pinctrl-bcm2835`,
+  `pinctrl-bcm2711` or `pinctrl-rp1`); if `gpiodetect` shows another, set
+  `WITTYPI_GPIO_CHIP`, e.g.
+  `systemd.services.wittypi.environment.WITTYPI_GPIO_CHIP = "gpiochip0";`.
+- The daemon exits instead of shutting down if waiting for the shutdown
+  signal fails.
 - `LC_ALL` is `C.UTF-8` instead of `en_GB.UTF-8`, which is usually not built
   on NixOS.
 - `sudo` is removed (both tools must run as root anyway).

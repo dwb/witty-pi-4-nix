@@ -9,9 +9,9 @@
   gnugrep,
   gnused,
   i2c-tools,
+  libgpiod,
   systemd,
   util-linux,
-  wiringpi,
 }:
 
 let
@@ -22,8 +22,8 @@ let
     gnugrep
     gnused
     i2c-tools
+    libgpiod
     util-linux
-    wiringpi
   ];
 in
 stdenvNoCC.mkDerivation (finalAttrs: {
@@ -54,7 +54,8 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     substituteInPlace utilities.sh \
       --replace-fail 'export LC_ALL=en_GB.UTF-8' \
         'export LC_ALL=C.UTF-8
-    export PATH="${runtimePath}:$PATH:${lib.getBin systemd}/bin"' \
+    export PATH="${runtimePath}:$PATH:${lib.getBin systemd}/bin"
+    . ${./scripts/gpio.sh}' \
       --replace-fail '"$(lsb_release -si)"' '"NixOS"' \
       --replace-fail 'dpkg --print-architecture' 'uname -m' \
       --replace-fail 'sudo ' "" \
@@ -70,6 +71,51 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     substituteInPlace wittyPi.sh \
       --replace-fail '. "$my_dir/runScript.sh" | tee -a "$my_dir/schedule.log"' \
         '(. "$my_dir/runScript.sh")'
+
+    # WiringPi's `gpio` fails unless it can identify the board from the
+    # Raspberry Pi kernel or firmware device tree, and daemon.sh then shuts
+    # down as if requested. Use libgpiod instead (helpers in gpio.sh).
+    substituteInPlace utilities.sh \
+      --replace-fail 'gpio -g mode $halt_pin in' "" \
+      --replace-fail 'gpio -g mode $halt_pin up' 'gpio_input_pullup $halt_pin'
+
+    substituteInPlace daemon.sh wittyPi.sh \
+      --replace-fail 'hash gpio ' 'hash gpioget '
+
+    substituteInPlace wittyPi.sh \
+      --replace-fail '$(gpio -g read $CHRG_PIN)' '$(gpio_read_pullup $CHRG_PIN)' \
+      --replace-fail '$(gpio -g read $STDBY_PIN)' '$(gpio_read_pullup $STDBY_PIN)'
+
+    substituteInPlace daemon.sh \
+      --replace-fail 'gpio -g mode $HALT_PIN up' 'gpio_input_pullup $HALT_PIN' \
+      --replace-fail 'gpio -g mode $HALT_PIN in' "" \
+      --replace-fail 'gpio -g mode $CHRG_PIN up' 'gpio_input_pullup $CHRG_PIN' \
+      --replace-fail 'gpio -g mode $CHRG_PIN in' "" \
+      --replace-fail 'gpio -g mode $STDBY_PIN up' 'gpio_input_pullup $STDBY_PIN' \
+      --replace-fail 'gpio -g mode $STDBY_PIN in' "" \
+      --replace-fail '[ $(gpio -g read $HALT_PIN) == '"'1'"' ]' \
+        '[ "$(gpio_read_pullup $HALT_PIN)" == '"'1'"' ]' \
+      --replace-fail 'gpio -g mode $SYSUP_PIN out
+    gpio -g write $SYSUP_PIN 1
+    sleep 0.1
+    gpio -g write $SYSUP_PIN 0
+    sleep 0.1
+    gpio -g write $SYSUP_PIN 1
+    sleep 0.1
+    gpio -g write $SYSUP_PIN 0
+    sleep 0.1
+    gpio -g mode $SYSUP_PIN in' \
+        'gpio_pulse_twice $SYSUP_PIN' \
+      --replace-fail 'gpio -g wfi $HALT_PIN falling' \
+        'if ! gpio_wait_falling $HALT_PIN; then
+      log "Unable to wait for GPIO-$HALT_PIN, exiting without shutting down."
+      exit 1
+    fi'
+
+    if grep -n 'gpio -g' *.sh; then
+      echo "unpatched WiringPi calls remain" >&2
+      exit 1
+    fi
   '';
 
   installPhase = ''
