@@ -75,6 +75,14 @@ Changes to the upstream scripts:
             beforeShutdown = ''
               ${pkgs.systemd}/bin/systemctl stop my-app.service
             '';
+
+            # Optional board settings; unset ones are left as they are.
+            settings = {
+              defaultOn = true;
+              lowVoltageThreshold = 11.5;
+              recoveryVoltageThreshold = 12.5;
+              overTemperature = { action = "shutdown"; threshold = 70; };
+            };
           };
         })
       ];
@@ -93,9 +101,47 @@ Options:
 | `beforeScript` | `""` | Commands run after boot, before the schedule is applied. |
 | `afterStartup` | `""` | Commands run after boot, once the schedule is applied. |
 | `beforeShutdown` | `""` | Commands run before the board-requested shutdown. |
+| `settings.*` | `null` | Board settings; see below. |
 
 The hook options are always managed declaratively; editing the hook files in
 `/var/lib/wittypi` by hand has no lasting effect.
+
+### Board settings
+
+`services.wittypi.settings` covers the settings in the `wittypi` menu
+(section 7 of the user manual). Each defaults to `null`, which leaves the
+board's value alone so it can still be changed with `wittypi`. The board keeps
+these in its EEPROM; the `wittypi-settings` service writes the ones that are
+set and differ from the board's, at boot and on `nixos-rebuild switch` when
+they change. Values set here overwrite changes made with `wittypi` at the next
+boot.
+
+| Option | Menu entry | Values |
+| --- | --- | --- |
+| `defaultOn` | Default state when powered | bool |
+| `defaultOnDelay` | Default ON delay | 0–10 s (firmware revision ≥ 2) |
+| `powerCutDelay` | Power cut delay after shutdown | 0.0–25.0 s |
+| `pulseInterval` | Pulsing interval during sleep | 1–20 s |
+| `whiteLedDuration` | White LED duration | 0–254, 0 = off |
+| `dummyLoadDuration` | Dummy load duration | 0–254, 0 = off |
+| `vinAdjustment` | Vin adjustment | -1.27–1.27 V |
+| `voutAdjustment` | Vout adjustment | -1.27–1.27 V |
+| `ioutAdjustment` | Iout adjustment | -1.27–1.27 A |
+| `lowVoltageThreshold` | Set low voltage threshold | 0 = off, 2.0–25.0 V (L3V7: 3.0–4.2 V) |
+| `recoveryVoltageThreshold` | Set recovery voltage threshold | 0 = off, 2.0–25.0 V (not L3V7) |
+| `startOnUsbPower` | Set recovery voltage threshold (L3V7) | bool |
+| `overTemperature` | Set over temperature action | `{ action = "none" \| "shutdown" \| "startup"; threshold = -30–80; }` (°C) |
+| `belowTemperature` | Set below temperature action | as `overTemperature` |
+
+Settings that the board model or firmware does not support (checked from the
+firmware ID and revision) make the service fail without writing anything.
+
+Negative adjustments are stored as two's complement, as the firmware reads
+them. `wittypi` encodes them off by one (`255 + value` rather than
+`256 + value`), so it shows a negative adjustment set here 0.01 too high, and
+one set with `wittypi` takes effect 0.01 lower than entered. -0.01 cannot be
+set: the firmware treats the byte `0xFF` in EEPROM as unset and restores the default when it
+next starts.
 
 ### Requirements and caveats
 

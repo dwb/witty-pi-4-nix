@@ -24,6 +24,257 @@ let
     "afterStartup.sh" = cfg.afterStartup;
     "beforeShutdown.sh" = cfg.beforeShutdown;
   };
+
+  s = cfg.settings;
+
+  # Nearest integer to a non-negative float.
+  roundPos = x: builtins.floor (x + 0.5);
+  round = x: if x < 0 then -(roundPos (-x)) else roundPos x;
+  # Two's complement byte, as the firmware reads the register as `char`.
+  signedByte = n: if n < 0 then 256 + n else n;
+  # Voltages are stored as tenths of a volt; 255 disables the threshold.
+  voltageByte = v: if v == 0 then 255 else round (v * 10);
+  adjustmentByte = a: signedByte (round (a * 100));
+  temperatureActions = {
+    none = 0;
+    shutdown = 1;
+    startup = 2;
+  };
+
+  # Registers are listed in the order they are written.
+  registers =
+    lib.optional (s.defaultOn != null) {
+      name = "default state when powered";
+      index = "$I2C_CONF_DEFAULT_ON";
+      value = if s.defaultOn then 1 else 0;
+    }
+    ++ lib.optional (s.defaultOnDelay != null) {
+      name = "default ON delay";
+      index = "$I2C_CONF_DEFAULT_ON_DELAY";
+      value = s.defaultOnDelay;
+    }
+    ++ lib.optional (s.powerCutDelay != null) {
+      name = "power cut delay";
+      index = "$I2C_CONF_POWER_CUT_DELAY";
+      value = round (s.powerCutDelay * 10);
+    }
+    ++ lib.optional (s.pulseInterval != null) {
+      name = "pulsing interval";
+      index = "$I2C_CONF_PULSE_INTERVAL";
+      value = s.pulseInterval;
+    }
+    ++ lib.optional (s.whiteLedDuration != null) {
+      name = "white LED duration";
+      index = "$I2C_CONF_BLINK_LED";
+      value = s.whiteLedDuration;
+    }
+    ++ lib.optional (s.dummyLoadDuration != null) {
+      name = "dummy load duration";
+      index = "$I2C_CONF_DUMMY_LOAD";
+      value = s.dummyLoadDuration;
+    }
+    ++ lib.optional (s.vinAdjustment != null) {
+      name = "Vin adjustment";
+      index = "$I2C_CONF_ADJ_VIN";
+      value = adjustmentByte s.vinAdjustment;
+    }
+    ++ lib.optional (s.voutAdjustment != null) {
+      name = "Vout adjustment";
+      index = "$I2C_CONF_ADJ_VOUT";
+      value = adjustmentByte s.voutAdjustment;
+    }
+    ++ lib.optional (s.ioutAdjustment != null) {
+      name = "Iout adjustment";
+      index = "$I2C_CONF_ADJ_IOUT";
+      value = adjustmentByte s.ioutAdjustment;
+    }
+    ++ lib.optional (s.lowVoltageThreshold != null) {
+      name = "low voltage threshold";
+      index = "$I2C_CONF_LOW_VOLTAGE";
+      value = voltageByte s.lowVoltageThreshold;
+    }
+    ++ lib.optional (s.recoveryVoltageThreshold != null) {
+      name = "recovery voltage threshold";
+      index = "$I2C_CONF_RECOVERY_VOLTAGE";
+      value = voltageByte s.recoveryVoltageThreshold;
+    }
+    ++ lib.optional (s.startOnUsbPower != null) {
+      name = "turn on when USB 5V is connected";
+      index = "$I2C_CONF_RECOVERY_VOLTAGE";
+      value = if s.startOnUsbPower then 1 else 0;
+    };
+
+  # The threshold is written before the action, so the action never runs
+  # against a stale threshold. The firmware also mirrors the threshold into
+  # the LM75B; upstream writes both, and so do we.
+  temperatureCommands =
+    kind: t: confPoint: lm75bPoint: confAction:
+    lib.optionalString (t != null) (
+      lib.optionalString (t.action != "none") ''
+        set_temperature_point '${kind}-temperature threshold' ${confPoint} ${lm75bPoint} ${toString (signedByte t.threshold)}
+      ''
+      + ''
+        set_register '${kind}-temperature action' ${confAction} ${toString temperatureActions.${t.action}}
+      ''
+    );
+
+  # Checks that depend on the board model and firmware, which can only be
+  # read at runtime. Firmware ID 0x37 (55) is the Witty Pi 4 L3V7.
+  modelChecks = lib.concatStrings [
+    (lib.optionalString
+      (
+        s.lowVoltageThreshold != null
+        && s.lowVoltageThreshold != 0
+        && (s.lowVoltageThreshold < 3 || s.lowVoltageThreshold > 4.2)
+      )
+      ''
+        if [ $firmwareID -eq 55 ]; then
+          unsupported 'lowVoltageThreshold must be 0 or between 3.0 and 4.2 on Witty Pi 4 L3V7.'
+        fi
+      ''
+    )
+    (lib.optionalString (s.recoveryVoltageThreshold != null) ''
+      if [ $firmwareID -eq 55 ]; then
+        unsupported 'recoveryVoltageThreshold is not supported on Witty Pi 4 L3V7; use startOnUsbPower.'
+      fi
+    '')
+    (lib.optionalString (s.startOnUsbPower != null) ''
+      if [ $firmwareID -ne 55 ]; then
+        unsupported 'startOnUsbPower is only supported on Witty Pi 4 L3V7; use recoveryVoltageThreshold.'
+      fi
+    '')
+    (lib.optionalString (s.defaultOnDelay != null) ''
+      if [ $firmwareRev -lt 2 ]; then
+        unsupported "defaultOnDelay needs firmware revision 2 or later (found $firmwareRev)."
+      fi
+    '')
+    (lib.optionalString (s.powerCutDelay != null && s.powerCutDelay > 8) ''
+      if [ $firmwareID -lt 38 ]; then
+        unsupported 'powerCutDelay above 8.0 needs a newer firmware.'
+      fi
+    '')
+  ];
+
+  settingsScript = pkgs.writeShellScript "wittypi-apply-settings" ''
+    # Generated by services.wittypi.
+    . ${cfg.package}/share/wittypi/utilities.sh
+
+    # Print the register's value in decimal, or nothing if it can't be read.
+    read_register()
+    {
+      local result=$(i2c_read $I2C_BUS $I2C_MC_ADDRESS $1)
+      if [[ $result =~ ^0x[0-9a-fA-F]{2}$ ]]; then
+        echo $((result))
+      fi
+    }
+
+    failed=0
+
+    # Write the register if it differs; the board stores it in EEPROM.
+    set_register()
+    {
+      local current=$(read_register $2)
+      if [ -z "$current" ]; then
+        log "Unable to read the $1 (register $2)."
+        failed=1
+      elif [ $current -ne $3 ]; then
+        log "Setting the $1 (register $2: $current -> $3)."
+        i2c_write $I2C_BUS $I2C_MC_ADDRESS $2 $3
+        if [ "$(read_register $2)" != $3 ]; then
+          log "Failed to set the $1."
+          failed=1
+        fi
+      fi
+    }
+
+    set_temperature_point()
+    {
+      local current=$(read_register $2)
+      if [ -n "$current" ] && [ $current -ne $4 ]; then
+        i2c_write $I2C_BUS $I2C_MC_ADDRESS $3 $4
+      fi
+      set_register "$1" $2 $4
+    }
+
+    unsupported()
+    {
+      log "Unsupported setting: $1"
+      failed=1
+    }
+
+    has_mc=0
+    for i in {1..5}; do
+      has_mc=$(is_mc_connected)
+      [ $has_mc == 1 ] && break
+      sleep 1
+    done
+    if [ $has_mc != 1 ]; then
+      log "Witty Pi is not detected at $I2C_MC_ADDRESS on I2C bus $I2C_BUS, settings not applied."
+      exit 1
+    fi
+
+    firmwareID=$(read_register $I2C_ID)
+    firmwareRev=$(read_register $I2C_FW_REVISION)
+    if [ -z "$firmwareID" ] || [ -z "$firmwareRev" ]; then
+      log 'Unable to read the firmware ID and revision, settings not applied.'
+      exit 1
+    fi
+
+    ${modelChecks}
+    if [ $failed != 0 ]; then
+      log 'Settings not applied.'
+      exit 1
+    fi
+
+    ${lib.concatMapStrings (r: ''
+      set_register '${r.name}' ${r.index} ${toString r.value}
+    '') registers}
+    ${temperatureCommands "over" s.overTemperature "$I2C_CONF_OVER_TEMP_POINT" "$I2C_LM75B_TOS"
+      "$I2C_CONF_OVER_TEMP_ACTION"
+    }
+    ${temperatureCommands "below" s.belowTemperature "$I2C_CONF_BELOW_TEMP_POINT" "$I2C_LM75B_THYST"
+      "$I2C_CONF_BELOW_TEMP_ACTION"
+    }
+    exit $failed
+  '';
+
+  hasSettings = registers != [ ] || s.overTemperature != null || s.belowTemperature != null;
+
+  nullOr = lib.types.nullOr;
+  inherit (lib.types) bool ints numbers;
+
+  temperatureOption =
+    kind: defaultThreshold: comparison:
+    lib.mkOption {
+      type = nullOr (
+        lib.types.submodule {
+          options = {
+            action = lib.mkOption {
+              type = lib.types.enum (lib.attrNames temperatureActions);
+              description = "What to do when the temperature is ${kind} the threshold.";
+            };
+            threshold = lib.mkOption {
+              type = ints.between (-30) 80;
+              default = defaultThreshold;
+              description = ''
+                Threshold in °C. The action is triggered when the temperature
+                is ${comparison} this value. Ignored when `action` is `"none"`.
+              '';
+            };
+          };
+        }
+      );
+      default = null;
+      example = {
+        action = "shutdown";
+        threshold = defaultThreshold;
+      };
+      description = ''
+        Action when the temperature is ${kind} a threshold ("Set ${kind}
+        temperature action"). A shutdown is only triggered once the system
+        has been on for 2 minutes.
+      '';
+    };
 in
 {
   options.services.wittypi = {
@@ -80,9 +331,171 @@ in
         halted (`beforeShutdown.sh`). Runs as root; shutdown waits for it.
       '';
     };
+
+    settings = {
+      defaultOn = lib.mkOption {
+        type = nullOr bool;
+        default = null;
+        description = ''
+          Whether the Raspberry Pi is turned on when power is connected
+          ("Default state when powered"). The board default is `false`: tap
+          the button to start.
+        '';
+      };
+
+      defaultOnDelay = lib.mkOption {
+        type = nullOr (ints.between 0 10);
+        default = null;
+        description = ''
+          Seconds to wait before turning on when power is connected and
+          `defaultOn` is set ("Default ON delay"). Needs firmware revision 2
+          or later.
+        '';
+      };
+
+      powerCutDelay = lib.mkOption {
+        type = nullOr (numbers.between 0 25);
+        default = null;
+        example = 7.0;
+        description = ''
+          Seconds between the start of shutdown and the power being cut
+          ("Power cut delay after shutdown"), in steps of 0.1. The board
+          default is 7.0. Older firmware accepts at most 8.0.
+        '';
+      };
+
+      pulseInterval = lib.mkOption {
+        type = nullOr (ints.between 1 20);
+        default = null;
+        description = ''
+          Seconds between the white LED blinks and dummy load pulses while
+          the Raspberry Pi is off ("Pulsing interval during sleep"). The board
+          default is 4.
+        '';
+      };
+
+      whiteLedDuration = lib.mkOption {
+        type = nullOr (ints.between 0 254);
+        default = null;
+        description = ''
+          How long the white LED stays on for each blink while the Raspberry
+          Pi is off, in firmware units; 0 disables blinking ("White LED
+          duration"). The board default is 100.
+        '';
+      };
+
+      dummyLoadDuration = lib.mkOption {
+        type = nullOr (ints.between 0 254);
+        default = null;
+        example = 10;
+        description = ''
+          How long the dummy load draws current for each pulse while the
+          Raspberry Pi is off, to keep a power bank awake, in firmware units;
+          0 disables it ("Dummy load duration"). The board default is 0;
+          UUGear suggest the smallest value that works, usually 10.
+        '';
+      };
+
+      vinAdjustment = lib.mkOption {
+        type = nullOr (numbers.between (-1.27) 1.27);
+        default = null;
+        description = ''
+          Volts added to the measured input voltage ("Vin adjustment"), in
+          steps of 0.01. The board default is 0.20. -0.01 is not allowed: the
+          firmware treats the resulting byte as unset.
+        '';
+      };
+
+      voutAdjustment = lib.mkOption {
+        type = nullOr (numbers.between (-1.27) 1.27);
+        default = null;
+        description = ''
+          Volts added to the measured output voltage ("Vout adjustment"), in
+          steps of 0.01. The board default is 0.20. -0.01 is not allowed.
+        '';
+      };
+
+      ioutAdjustment = lib.mkOption {
+        type = nullOr (numbers.between (-1.27) 1.27);
+        default = null;
+        description = ''
+          Amps added to the measured output current ("Iout adjustment"), in
+          steps of 0.01. The board default is 0.00. -0.01 is not allowed.
+        '';
+      };
+
+      lowVoltageThreshold = lib.mkOption {
+        type = nullOr (numbers.between 0 25);
+        default = null;
+        example = 11.5;
+        description = ''
+          Input voltage (VIN) below which the Raspberry Pi is shut down, in
+          volts with steps of 0.1 ("Set low voltage threshold"). 0 disables
+          it (the board default). Otherwise 2.0–25.0, or 3.0–4.2 on the
+          Witty Pi 4 L3V7.
+        '';
+      };
+
+      recoveryVoltageThreshold = lib.mkOption {
+        type = nullOr (numbers.between 0 25);
+        default = null;
+        example = 12.5;
+        description = ''
+          Input voltage (VIN) above which the Raspberry Pi is turned on again
+          after a low voltage shutdown, in volts with steps of 0.1 ("Set
+          recovery voltage threshold"). 0 disables it (the board default).
+          Otherwise 2.0–25.0. Without `lowVoltageThreshold`, the Raspberry Pi
+          is turned on whenever VIN is above it, including straight after a
+          shutdown. Not available on the Witty Pi 4 L3V7; see
+          `startOnUsbPower`.
+        '';
+      };
+
+      startOnUsbPower = lib.mkOption {
+        type = nullOr bool;
+        default = null;
+        description = ''
+          Witty Pi 4 L3V7 only: whether to turn on the Raspberry Pi when USB
+          5V is connected (the L3V7's "Set recovery voltage threshold").
+        '';
+      };
+
+      overTemperature = temperatureOption "above" 80 "higher than";
+      belowTemperature = temperatureOption "below" 75 "lower than";
+    };
   };
 
   config = lib.mkIf cfg.enable {
+    assertions =
+      lib.concatMap
+        (name: [
+          {
+            assertion = s.${name} == null || s.${name} == 0 || s.${name} >= 2;
+            message = "services.wittypi.settings.${name} must be 0 (disabled) or between 2.0 and 25.0.";
+          }
+        ])
+        [
+          "lowVoltageThreshold"
+          "recoveryVoltageThreshold"
+        ]
+      ++
+        map
+          (name: {
+            assertion = s.${name} == null || adjustmentByte s.${name} != 255;
+            message = "services.wittypi.settings.${name} cannot be -0.01, which the firmware treats as unset.";
+          })
+          [
+            "vinAdjustment"
+            "voutAdjustment"
+            "ioutAdjustment"
+          ]
+      ++ [
+        {
+          assertion = s.recoveryVoltageThreshold == null || s.startOnUsbPower == null;
+          message = "services.wittypi.settings: recoveryVoltageThreshold and startOnUsbPower share a register; set at most one.";
+        }
+      ];
+
     hardware.i2c.enable = lib.mkDefault true;
 
     # /dev/i2c-1 appears once the I2C controller driver has probed, which can
@@ -105,6 +518,27 @@ in
     ) hooks
     // lib.optionalAttrs (cfg.schedule != null) {
       "${home}/schedule.wpi"."L+".argument = "${pkgs.writeText "schedule.wpi" cfg.schedule}";
+    };
+
+    # The board keeps its settings in EEPROM; this writes the ones that are
+    # set and differ. It runs again on switch when the settings change.
+    systemd.services.wittypi-settings = lib.mkIf hasSettings {
+      description = "Apply Witty Pi 4 settings";
+      wantedBy = [ "multi-user.target" ];
+      before = [ "wittypi.service" ];
+      wants = [ i2cDevice ];
+      after = [
+        i2cDevice
+        "systemd-modules-load.service"
+      ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = settingsScript;
+        StandardOutput = "null";
+        StandardError = "journal";
+        SyslogIdentifier = "wittypi";
+      };
     };
 
     systemd.services.wittypi = {
